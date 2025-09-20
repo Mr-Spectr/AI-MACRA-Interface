@@ -1,0 +1,13 @@
+# Python Dependencies for MACRA Market Analyzer
+
+Flask==2.3.3
+Flask-CORS==4.0.0
+yfinance==0.2.21
+pandas==2.1.0
+numpy==1.24.3
+requests==2.31.0
+Werkzeug==2.3.7
+python-dotenv==1.0.0
+
+# Optional for development
+gunicorn==21.2.0  # For production deployment
