@@ -9,10 +9,35 @@ import numpy as np
 from datetime import datetime, timedelta
 import requests
 import logging
+import time
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Simple in-memory cache to reduce API calls
+class DataCache:
+    def __init__(self, cache_duration_minutes=15):
+        self.cache = {}
+        self.cache_duration = timedelta(minutes=cache_duration_minutes)
+    
+    def get(self, key):
+        if key in self.cache:
+            data, timestamp = self.cache[key]
+            if datetime.now() - timestamp < self.cache_duration:
+                logger.info(f"Cache hit for {key}")
+                return data
+            else:
+                # Remove expired cache entry
+                del self.cache[key]
+        return None
+    
+    def set(self, key, data):
+        self.cache[key] = (data, datetime.now())
+        logger.info(f"Cached data for {key}")
+
+# Global cache instance
+cache = DataCache()
 
 # Create templates directory if it doesn't exist
 os.makedirs('templates', exist_ok=True)
@@ -25,35 +50,153 @@ class StockAnalyzer:
         self.news_api_key = 'demo_key'
         # Use environment variable for API key in production
         self.openai_api_key = os.environ.get('OPENAI_API_KEY', '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')
+        
+        # Mock data for when Yahoo Finance is unavailable
+        self.mock_data = {
+            'AMZN': {
+                'symbol': 'AMZN',
+                'name': 'Amazon.com Inc',
+                'current_price': 145.86,
+                'change': -1.2,
+                'volume': 45234567,
+                'market_cap': 1523000000000,
+                'pe_ratio': 47.3,
+                'dividend_yield': 0.0,
+                'historical_data': []
+            },
+            'TSLA': {
+                'symbol': 'TSLA',
+                'name': 'Tesla Inc',
+                'current_price': 248.50,
+                'change': 2.8,
+                'volume': 78456123,
+                'market_cap': 789000000000,
+                'pe_ratio': 62.4,
+                'dividend_yield': 0.0,
+                'historical_data': []
+            },
+            'AAPL': {
+                'symbol': 'AAPL',
+                'name': 'Apple Inc',
+                'current_price': 221.27,
+                'change': 0.8,
+                'volume': 34567890,
+                'market_cap': 3400000000000,
+                'pe_ratio': 33.7,
+                'dividend_yield': 0.44,
+                'historical_data': []
+            },
+            'GOOGL': {
+                'symbol': 'GOOGL',
+                'name': 'Alphabet Inc',
+                'current_price': 163.74,
+                'change': 1.5,
+                'volume': 23456789,
+                'market_cap': 2100000000000,
+                'pe_ratio': 24.8,
+                'dividend_yield': 0.0,
+                'historical_data': []
+            },
+            'MSFT': {
+                'symbol': 'MSFT',
+                'name': 'Microsoft Corporation',
+                'current_price': 416.42,
+                'change': 0.6,
+                'volume': 19876543,
+                'market_cap': 3100000000000,
+                'pe_ratio': 35.2,
+                'dividend_yield': 0.72,
+                'historical_data': []
+            }
+        }
     
     # ... rest of your existing code stays the same ...
     def get_stock_data(self, symbol):
-        """Get stock data with improved error handling"""
+        """Get stock data with caching and improved error handling"""
         try:
             if not symbol or len(symbol) > 10:
                 return {'error': 'Invalid stock symbol'}
+            
+            # Check cache first
+            cache_key = f"stock_data_{symbol.upper()}"
+            cached_data = cache.get(cache_key)
+            if cached_data:
+                return cached_data
                 
-            stock = yf.Ticker(symbol)
-            hist = stock.history(period="1y")
-            info = stock.info
+            logger.info(f"Fetching fresh data for {symbol}")
             
-            if not info:
-                return {'error': f'No data found for symbol {symbol}'}
+            # Retry logic with exponential backoff
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    # Add progressive delay to avoid rate limiting
+                    delay = 2.0 * (attempt + 1)  # 2, 4, 6 seconds
+                    time.sleep(delay)
+                    
+                    stock = yf.Ticker(symbol)
+                    hist = stock.history(period="1y")
+                    info = stock.info
+                    
+                    if not info:
+                        if attempt < max_retries - 1:
+                            logger.warning(f"No data for {symbol}, retrying attempt {attempt + 2}")
+                            continue
+                        else:
+                            error_msg = f'No data found for symbol {symbol}. Please verify the symbol and try again in a few minutes.'
+                            return {'error': error_msg}
+                    
+                    result = {
+                        'symbol': symbol,
+                        'name': info.get('longName', info.get('shortName', 'N/A')),
+                        'current_price': info.get('currentPrice', hist['Close'][-1] if len(hist) > 0 else 0),
+                        'change': info.get('regularMarketChangePercent', 0),
+                        'volume': info.get('volume', info.get('regularMarketVolume', 0)),
+                        'market_cap': info.get('marketCap', 'N/A'),
+                        'pe_ratio': info.get('trailingPE', info.get('forwardPE', 'N/A')),
+                        'dividend_yield': info.get('dividendYield', 0),
+                        'historical_data': hist.tail(30).to_dict('records') if len(hist) > 0 else []
+                    }
+                    
+                    # Cache the successful result
+                    cache.set(cache_key, result)
+                    return result
+                    
+                except Exception as retry_error:
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Attempt {attempt + 1} failed for {symbol}: {str(retry_error)}")
+                        continue
+                    else:
+                        # Last attempt failed, raise the error
+                        raise retry_error
             
-            return {
-                'symbol': symbol,
-                'name': info.get('longName', info.get('shortName', 'N/A')),
-                'current_price': info.get('currentPrice', hist['Close'][-1] if len(hist) > 0 else 0),
-                'change': info.get('regularMarketChangePercent', 0),
-                'volume': info.get('volume', info.get('regularMarketVolume', 0)),
-                'market_cap': info.get('marketCap', 'N/A'),
-                'pe_ratio': info.get('trailingPE', info.get('forwardPE', 'N/A')),
-                'dividend_yield': info.get('dividendYield', 0),
-                'historical_data': hist.tail(30).to_dict('records') if len(hist) > 0 else []
-            }
         except Exception as e:
-            print(f"Error fetching stock data for {symbol}: {str(e)}")
-            return {'error': f'Unable to fetch data for {symbol}. Please verify the symbol is correct.'}
+            error_msg = str(e)
+            print(f"Error fetching stock data for {symbol}: {error_msg}")
+            
+            # Check if we have mock data for this symbol
+            symbol_upper = symbol.upper()
+            if symbol_upper in self.mock_data:
+                print(f"Using demo data for {symbol} due to API unavailability")
+                mock_result = self.mock_data[symbol_upper].copy()
+                mock_result['demo_mode'] = True
+                mock_result['demo_message'] = "📊 Demo Mode: Yahoo Finance API is temporarily unavailable. Showing sample data."
+                
+                # Cache the mock data briefly
+                cache_key = f"stock_data_{symbol.upper()}"
+                cache.set(cache_key, mock_result)
+                return mock_result
+            
+            # Handle specific error types for unsupported symbols
+            if "429" in error_msg or "Too Many Requests" in error_msg:
+                return {'error': f'Rate limit reached for {symbol}. Try waiting 10-15 minutes, or use supported demo symbols: AAPL, AMZN, GOOGL, TSLA, MSFT.'}
+            elif "404" in error_msg or "not found" in error_msg.lower():
+                return {'error': f'Stock symbol {symbol} not found. Try supported symbols: AAPL, AMZN, GOOGL, TSLA, MSFT.'}
+            else:
+                return {'error': f'Unable to fetch data for {symbol}. API temporarily unavailable. Try: AAPL, AMZN, GOOGL, TSLA, MSFT.'}
+    
+    def get_mock_data_if_available(self, symbol):
+        """Get mock data for supported symbols"""
+        return self.mock_data.get(symbol.upper())
     
     def analyze_stock(self, symbol):
         stock_data = self.get_stock_data(symbol)
@@ -127,8 +270,15 @@ class StockAnalyzer:
         }
     
     def get_news(self, symbol):
+        """Get news data with caching"""
+        # Check cache first
+        cache_key = f"news_data_{symbol.upper()}"
+        cached_news = cache.get(cache_key)
+        if cached_news:
+            return cached_news
+        
         # Fallback news since we removed the API dependency
-        return [
+        news_data = [
             {
                 'title': f'{symbol} Market Analysis Update',
                 'description': f'Stay updated with the latest {symbol} market trends, financial performance, and investment insights.',
@@ -148,14 +298,22 @@ class StockAnalyzer:
                 'publishedAt': datetime.now().isoformat()
             }
         ]
+        
+        # Cache the news data
+        cache.set(cache_key, news_data)
+        return news_data
     
     def get_ai_response(self, user_message, stock_context=None):
-        """Get AI response using OpenRouter API"""
+        """Get AI response using OpenRouter API with fallback"""
         try:
+            # First, return a smart local response for common queries to avoid API calls
+            if self.should_use_fallback(user_message):
+                return self.get_fallback_response(user_message, stock_context)
+                
             headers = {
                 'Authorization': f'Bearer {self.openai_api_key}',
                 'Content-Type': 'application/json',
-                'HTTP-Referer': os.environ.get('FLASK_HOST', 'http://localhost:5000'),
+                'HTTP-Referer': 'https://macra-ai-analyzer.com',
                 'X-Title': 'MACRA Market Analyzer'
             }
             
@@ -200,13 +358,16 @@ You are integrated into the MACRA Market Analyzer platform that provides real-ti
                         'https://openrouter.ai/api/v1/chat/completions',
                         headers=headers,
                         json=data,
-                        timeout=30
+                        timeout=15  # Reduced timeout
                     )
                     
                     if response.status_code == 200:
                         result = response.json()
                         if 'choices' in result and len(result['choices']) > 0:
                             return result['choices'][0]['message']['content']
+                    elif response.status_code == 401:
+                        # API key issue, use fallback immediately
+                        break
                     elif response.status_code == 429:
                         continue  # Try next model if rate limited
                     else:
@@ -224,22 +385,61 @@ You are integrated into the MACRA Market Analyzer platform that provides real-ti
             print(f"AI Response Error: {str(e)}")
             return self.get_fallback_response(user_message, stock_context)
     
+    def should_use_fallback(self, user_message):
+        """Determine if we should use local fallback instead of API"""
+        message_lower = user_message.lower()
+        # Use fallback for common/simple questions to reduce API calls
+        # Also use fallback for initial empty/minimal messages and stock recommendation questions
+        fallback_triggers = [
+            'hello', 'hi', 'help', 'what can you do', 'how to start', 'beginner', 'hey',
+            'what stock should i buy', 'which stock', 'recommend stock', 'should buy',
+            'good stock to buy', 'best stock'
+        ]
+        return any(trigger in message_lower for trigger in fallback_triggers) or len(message_lower.strip()) < 5
+    
     def get_fallback_response(self, user_message, stock_context=None):
         """Provide intelligent fallback responses when AI API is unavailable"""
-        message_lower = user_message.lower()
+        message_lower = user_message.lower().strip()
         
-        # Stock-specific questions
-        if any(word in message_lower for word in ['buy', 'sell', 'invest', 'good stock']):
-            return """📈 Great question! When evaluating any stock, consider these key factors:
+        # Handle greetings and initial chat (including empty or minimal messages)
+        if not message_lower or any(word in message_lower for word in ['hello', 'hi', 'hey', 'start']):
+            return """🤖 Hi! I'm your MACRA AI assistant, here to help you learn about stocks and investing! 
 
-• **Financial Health**: Look at revenue growth, profit margins, and debt levels
-• **Valuation**: Check if the P/E ratio is reasonable compared to competitors  
-• **Market Position**: Strong brand, competitive advantages
-• **Future Prospects**: Growth potential in their industry
+💡 **I can help you with:**
+• Understanding stock analysis and metrics
+• Explaining investment concepts for beginners
+• Risk assessment and management strategies
+• Market trends and economic indicators
 
-💡 **Remember**: This is educational content, not financial advice. Always do your own research and consider consulting a financial advisor!
+📈 **Popular Questions:**
+• "How do I start investing?"
+• "What does P/E ratio mean?"
+• "Is [STOCK] a good buy?"
+• "How risky is this investment?"
 
-🔍 Use our analyzer above to get detailed metrics and AI scoring for any stock."""
+What would you like to learn about?"""
+
+        # Stock recommendation questions
+        elif any(word in message_lower for word in ['buy', 'sell', 'invest', 'good stock', 'should buy', 'recommend', 'which stock']):
+            return """� **Stock Investment Guidance:**
+
+I can't recommend specific stocks to buy, but I can teach you how to choose wisely! 
+
+🔍 **Research Process:**
+• **Step 1**: Use our analyzer above to check AMZN, AAPL, TSLA, GOOGL, or MSFT
+• **Step 2**: Look for companies with strong financials and reasonable P/E ratios
+• **Step 3**: Consider your risk tolerance and investment timeline
+• **Step 4**: Diversify - don't put all money in one stock!
+
+📊 **Key Metrics to Check:**
+• P/E Ratio (15-25 is often reasonable)
+• Revenue growth over time
+• Market cap and trading volume
+• Industry position and competition
+
+⚠️ **Important**: This is educational guidance, not financial advice. Start with small amounts, learn as you go, and consider consulting a financial advisor!
+
+Try analyzing a stock above to see these principles in action! 📈"""
 
         # P/E ratio questions
         elif 'p/e' in message_lower or 'pe ratio' in message_lower or 'price to earnings' in message_lower:
